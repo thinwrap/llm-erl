@@ -208,7 +208,7 @@ sse_head() ->
 
 chunk(B) -> [integer_to_list(byte_size(B), 16), "\r\n", B, "\r\n"].
 
-send(S, Data) -> _ = ssl:send(S, Data).
+send(S, Data) -> _ = ssl:send(S, connection_close(Data)).
 
 read_request(S, Acc) ->
     case binary:split(Acc, <<"\r\n\r\n">>) of
@@ -515,3 +515,13 @@ flush_requests() ->
         {request, _} -> flush_requests()
     after 0 -> ok
     end.
+
+%% The server closes the connection after every response, so it says so:
+%% without `Connection: close` httpc may keep the session and send the next
+%% request on a socket the server is already closing, which stalls that request
+%% until it times out.
+connection_close(<<"HTTP/1.1 ", _/binary>> = Reply) ->
+    [StatusLine, Rest] = binary:split(Reply, <<"\r\n">>),
+    <<StatusLine/binary, "\r\nConnection: close\r\n", Rest/binary>>;
+connection_close(Data) ->
+    Data.
