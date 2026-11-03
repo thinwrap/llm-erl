@@ -115,7 +115,7 @@ plus 3 natives: `anthropic` (`api_key`), `bedrock` (`region`, `access_key_id`,
 
 Any credential may be a binary or a zero-arity fun returning one, which keeps
 the secret out of crash reports that print the config. Per-provider details
-live in [`docs/providers/`](docs/providers/).
+live in [`docs/providers/`](https://github.com/thinwrap/llm-erl/tree/main/docs/providers).
 
 ## The ≥90% baseline & passthrough
 
