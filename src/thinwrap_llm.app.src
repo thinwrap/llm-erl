@@ -1,0 +1,19 @@
+{application, thinwrap_llm, [
+    {description,
+        "Lightweight, SDK-free, zero-dependency Erlang wrapper for chat completions "
+        "(with streaming) and embeddings across 18 LLM providers behind one normalized surface."},
+    {vsn, "1.1.0"},
+    {registered, []},
+    %% inets + ssl back the default httpc transport; crypto signs Bedrock
+    %% requests (SigV4). A caller who injects their own transport still gets
+    %% them started, which is harmless.
+    {applications, [kernel, stdlib, inets, ssl, public_key, crypto]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [
+        {"GitHub", "https://github.com/thinwrap/llm-erl"},
+        {"Changelog", "https://github.com/thinwrap/llm-erl/blob/main/CHANGELOG.md"},
+        {"Website", "https://thinwrap.dev"}
+    ]}
+]}.

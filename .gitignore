@@ -1,0 +1,24 @@
+# rebar3
+_build/
+_checkouts/
+doc/
+*.crashdump
+erl_crash.dump
+/erl_crash.dump
+/rebar3.crashdump
+.rebar3/
+
+# Test / coverage
+_build/test/cover/
+*.coverdata
+logs/
+test/logs/
+
+# macOS
+.DS_Store
+
+# IDE and editor settings
+.idea/
+.vscode/
+.elixir_ls/
+.erlang_ls/

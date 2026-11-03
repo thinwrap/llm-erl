@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The three OTP lines the OTP team supports; 27 is the floor (stdlib json).
+        otp: ['27', '28', '29']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.28.0'
+      - name: compile (warnings are errors)
+        run: rebar3 compile
+      - name: format
+        run: rebar3 fmt --check
+      - name: xref
+        run: rebar3 xref
+      - name: dialyzer
+        run: rebar3 dialyzer
+      - name: lint (elvis)
+        run: rebar3 lint
+      - name: dead code (hank)
+        run: rebar3 hank
+      - name: test + coverage gate (>=80%)
+        run: |
+          rebar3 eunit
+          rebar3 cover --min_coverage=80
+      - name: package builds
+        run: rebar3 hex build
+
+  eqwalizer:
+    # Gradual type checking beyond Dialyzer. One OTP line is enough: the
+    # findings are about the source, not the runtime.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: '29'
+          rebar3-version: '3.28.0'
+      # eqWAlizer's checker runs on the JVM and needs Java 11+.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: install ELP (pinned release + checksum)
+        run: |
+          url=https://github.com/WhatsApp/erlang-language-platform/releases/download/2026-10-14/elp-linux-x86_64-unknown-linux-gnu-otp-29.1.tar.gz
+          curl -fsSL "$url" -o elp.tar.gz
+          echo "3251f2d3550adf28f33529686103fabb1fbf0b0e7deb5cd06b93dab06b8647ea  elp.tar.gz" | sha256sum -c -
+          tar -xzf elp.tar.gz
+          sudo install elp /usr/local/bin/elp
+      - name: eqwalizer (src/)
+        run: scripts/eqwalize.sh

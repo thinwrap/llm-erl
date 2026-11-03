@@ -1,0 +1,181 @@
+name: Publish to Hex
+
+# Tag-driven publish to hex.pm with Hex Trusted Publishing ("workload
+# identity"): GitHub's OIDC token is exchanged for a 15-minute token that can
+# publish only `thinwrap_llm`. No stored API key.
+#
+# ONE-TIME BOOTSTRAP. A workload identity cannot create a package, so the very
+# first version is published by hand from a maintainer machine:
+#
+#   rebar3 hex user auth
+#   rebar3 hex publish --repo hexpm
+#
+# then, on hex.pm -> thinwrap_llm -> "Workload identities" (package owner,
+# 2FA on), add: owner `thinwrap`, repository `llm-erl`, workflow
+# `release.yml`, environment `hex`. Every later `v*.*.*` tag publishes here.
+#
+# rebar3 has no built-in OIDC exchange yet (Mix's `hex.publish` does it since
+# Hex 2.6.0), so the exchange is done with curl below and the token handed to
+# rebar3 as `HEX_API_KEY="Bearer <token>"`, which rebar3 sends verbatim as the
+# Authorization header. The first tag-driven publish is the first real test
+# of that path; if it fails, the fallback is hex_core's own route
+# (`mix hex.publish` with a small publish.exs shim).
+#
+# Jobs: `gate` re-runs every CI check against the tagged commit; `publish`
+# (environment `hex`, the only job with `id-token: write`) exchanges the token
+# and publishes package + docs; `release` cuts the GitHub Release from the
+# CHANGELOG section, after the publish, so a failed publish never leaves a
+# release for a version that is not on Hex. Unlike the PyPI workflow, `publish`
+# has to build with rebar3 plugins in the job that holds the token: rebar3_hex
+# builds and uploads in one step.
+#
+# Trigger: push of a `v*.*.*` tag. Branch protection does not cover tags, so
+# the gate refuses to continue unless the tagged commit is on `main`.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PACKAGE: thinwrap_llm
+
+jobs:
+  gate:
+    name: gate (OTP ${{ matrix.otp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        otp: ['27', '28', '29']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0    # full history for the on-main ancestry check
+          persist-credentials: false
+
+      # Tags bypass branch protection; without this, a tag on any commit
+      # (for example on an unmerged branch) would publish to Hex.
+      - name: Verify the tagged commit is on main
+        run: |
+          git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null || {
+            echo "::error::origin/main was not fetched; refusing to publish."
+            exit 1
+          }
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tagged commit $GITHUB_SHA is not on main; refusing to publish."
+            exit 1
+          fi
+
+      - name: Verify git tag matches the .app.src vsn
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          app_version="$(sed -nE 's/.*\{vsn, *"([^"]+)"\}.*/\1/p' "src/${PACKAGE}.app.src")"
+          if [ "$tag_version" != "$app_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (=$tag_version) does not match vsn $app_version"
+            exit 1
+          fi
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: '3.28.0'
+      - run: rebar3 compile
+      - run: rebar3 fmt --check
+      - run: rebar3 xref
+      - run: rebar3 dialyzer
+      - run: rebar3 lint
+      - run: rebar3 hank
+      - name: test + coverage gate (>=80%)
+        run: |
+          rebar3 eunit
+          rebar3 cover --min_coverage=80
+      - run: rebar3 hex build
+
+  publish:
+    name: publish thinwrap_llm
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: hex      # must match the environment on the Hex workload identity
+    permissions:
+      contents: read
+      id-token: write     # the GitHub OIDC token Hex exchanges
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: '28'
+          rebar3-version: '3.28.0'
+
+      - name: Exchange the GitHub OIDC token for a Hex publish token
+        id: hex
+        run: |
+          set -euo pipefail
+          # Hex asks clients to read the audience rather than hard-code it.
+          aud="$(curl -fsS https://hex.pm/api/oidc/audience | jq -r .audience)"
+          oidc="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${aud}" | jq -r .value)"
+          token="$(curl -fsS -X POST https://hex.pm/api/oauth/token \
+            --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' \
+            --data-urlencode "assertion=${oidc}" \
+            --data-urlencode "scope=package:hexpm/${PACKAGE}" | jq -r .access_token)"
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "::error::Hex token exchange failed (is the workload identity configured?)"
+            exit 1
+          fi
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish package + docs
+        env:
+          HEX_API_KEY: Bearer ${{ steps.hex.outputs.token }}
+        run: rebar3 hex publish --repo hexpm --yes
+
+      - name: Revoke the Hex token
+        if: always() && steps.hex.outputs.token != ''
+        run: |
+          curl -fsS -X POST https://hex.pm/api/oauth/revoke \
+            --data-urlencode "token=${{ steps.hex.outputs.token }}" || true
+
+  release:
+    name: GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # required to create the GitHub Release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping."
+            exit 0
+          fi
+          # The notes are the version's CHANGELOG section, so the release page
+          # and the CHANGELOG never disagree.
+          tr -d '\r' < CHANGELOG.md \
+            | awk -v h="## [${tag#v}]" 'index($0, h) == 1 {f = 1; next} f && /^## \[/ {exit} f' \
+            | sed -E '/^\[[^]]*\]: https?:\/\//d' > notes.md
+          if grep -q '[^[:space:]]' notes.md; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --notes-file notes.md --verify-tag
+          else
+            echo "::warning::CHANGELOG.md has no section for ${tag#v}; using generated notes."
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes --verify-tag
+          fi
